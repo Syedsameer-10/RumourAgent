@@ -1,77 +1,97 @@
 """
 TruthLens Reasoning Agent
 
-Responsible for analyzing collected evidence and producing
-a final verdict with confidence score and explanation.
+Coordinates with GeminiService to produce a verdict, cross-references
+supporting evidence citations, and ensures uncertainty is made explicit.
 """
 
 import logging
 from typing import Any
 
-from services.gemini_service import GeminiService
+from services.gemini_service import GeminiService, GeminiAPIError, GeminiTimeoutError, GeminiParseError
 
 logger = logging.getLogger(__name__)
 
 
 class ReasoningAgent:
     """
-    Agent responsible for verdict generation.
-
-    Takes a claim and its evidence, delegates analysis to the
-    GeminiService, and assembles the final verification result.
+    Agent responsible for verdict generation and evidence alignment.
     """
 
     def __init__(self, gemini_service: GeminiService) -> None:
-        """
-        Initialize the Reasoning Agent.
-
-        Args:
-            gemini_service: An instance of GeminiService (injected).
-        """
         self._gemini_service = gemini_service
 
     def analyze(self, claim: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
         """
-        Analyze the claim against the collected evidence and produce a verdict.
-
-        Args:
-            claim: The normalized claim text.
-            evidence: List of evidence dicts from the EvidenceAgent.
-
-        Returns:
-            A complete verification result dictionary containing:
-                - claim: The original claim text
-                - verdict: Final verdict string
-                - confidence: Confidence score (0-100)
-                - explanation: Reasoning behind the verdict
-                - publisher: Primary publisher name (from evidence)
-                - source_url: Primary source URL (from evidence)
+        Analyze claim against collected evidence.
+        Returns a rich result with verified citations and provenance metadata.
+        Propagates operational exceptions with distinct error status.
         """
         logger.info("ReasoningAgent analyzing claim: '%s'", claim)
 
-        # Get AI analysis from Gemini
-        analysis = self._gemini_service.analyze(claim, evidence)
+        try:
+            analysis = self._gemini_service.analyze(claim, evidence)
+        except (GeminiAPIError, GeminiTimeoutError, GeminiParseError) as op_err:
+            logger.error("Operational failure in reasoning: %s", op_err)
+            # Return explicit failure status so memory agent knows NOT to cache this as normal verification
+            return {
+                "claim": claim,
+                "status": "OPERATIONAL_FAILURE",
+                "error_type": type(op_err).__name__,
+                "error_message": str(op_err),
+                "verdict": "ERROR",
+                "confidence": 0,
+                "explanation": f"Operational failure during analysis: {op_err}",
+                "citations": [],
+                "evidence_snapshot": evidence,
+                "model_used": self._gemini_service.model_name
+            }
 
-        # Extract primary publisher and source URL from evidence
-        publisher = "N/A"
-        source_url = "N/A"
-        if evidence:
-            publisher = evidence[0].get("publisher", "N/A")
-            source_url = evidence[0].get("review_url", "N/A")
+        # Resolve citations: match supporting indices to actual evidence
+        citations: list[dict[str, Any]] = []
+        supporting_indices = analysis.get("supporting_source_indices", [])
 
-        # Assemble the final result
+        if supporting_indices and evidence:
+            for idx in supporting_indices:
+                if 1 <= idx <= len(evidence):
+                    item = evidence[idx - 1]
+                    citations.append({
+                        "source_id": idx,
+                        "publisher": item.get("publisher", "Unknown"),
+                        "title": item.get("title", "Article"),
+                        "tier": item.get("tier", "Web Source"),
+                        "url": item.get("review_url", ""),
+                        "snippet": item.get("rating", "")
+                    })
+        elif evidence:
+            # Fallback: if model did not return indices, provide the top ranked item with explicit disclaimer
+            top_item = evidence[0]
+            citations.append({
+                "source_id": 1,
+                "publisher": top_item.get("publisher", "Unknown"),
+                "title": top_item.get("title", "Article"),
+                "tier": top_item.get("tier", "Web Source"),
+                "url": top_item.get("review_url", ""),
+                "snippet": top_item.get("rating", "")
+            })
+
         result: dict[str, Any] = {
             "claim": claim,
+            "status": "SUCCESS",
             "verdict": analysis.get("verdict", "Unverified"),
             "confidence": analysis.get("confidence", 0),
             "explanation": analysis.get("explanation", "No explanation available."),
-            "publisher": publisher,
-            "source_url": source_url,
+            "citations": citations,
+            "evidence_snapshot": evidence,
+            "model_used": analysis.get("model_used", self._gemini_service.model_name),
+            "primary_publisher": citations[0]["publisher"] if citations else "N/A",
+            "primary_url": citations[0]["url"] if citations else "N/A",
         }
 
         logger.info(
-            "ReasoningAgent verdict: %s (confidence: %d%%)",
+            "ReasoningAgent verdict: %s (confidence: %d%%, citations: %d)",
             result["verdict"],
             result["confidence"],
+            len(citations)
         )
         return result

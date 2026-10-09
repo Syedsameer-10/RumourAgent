@@ -21,8 +21,8 @@ class Config:
         env_path = Path(__file__).resolve().parent.parent / ".env"
         load_dotenv(dotenv_path=env_path)
 
-        self.google_factcheck_api_key: str = os.getenv("GOOGLE_FACTCHECK_API_KEY", "")
-        self.gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+        self.google_factcheck_api_key: str = (os.getenv("GOOGLE_FACTCHECK_API_KEY") or "").strip().strip('"').strip("'")
+        self.gemini_api_key: str = (os.getenv("GEMINI_API_KEY") or "").strip().strip('"').strip("'")
 
         # Project paths
         self.project_root: Path = Path(__file__).resolve().parent.parent

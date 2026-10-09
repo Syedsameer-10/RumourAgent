@@ -6,7 +6,7 @@ query = "covid vaccine contains microchip fact check"
 print(f"Searching: {query}\n")
 
 try:
-    results = ddgs.text(keywords=query, max_results=3)
+    results = ddgs.text(query, max_results=3)
     print(f"Got {len(results)} results:\n")
     for i, r in enumerate(results, 1):
         print(f"{i}. {r.get('title', 'N/A')}")

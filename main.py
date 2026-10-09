@@ -13,7 +13,7 @@ import sys
 import logging
 
 from utils.config import Config
-from utils.helpers import print_report
+from utils.helpers import print_report, TerminalSpinner
 
 from services.factcheck_service import FactCheckService
 from services.gemini_service import GeminiService
@@ -25,8 +25,9 @@ from agents.reasoning_agent import ReasoningAgent
 
 # ── Logging Configuration ──────────────────────────────────────────
 
+log_level = logging.DEBUG if "--debug" in sys.argv else logging.WARNING
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -49,19 +50,13 @@ BANNER = """
 def initialize() -> tuple[ClaimAgent, MemoryAgent, EvidenceAgent, ReasoningAgent]:
     """
     Initialize configuration, services, and agents.
-
-    Returns:
-        A tuple of (ClaimAgent, MemoryAgent, EvidenceAgent, ReasoningAgent).
     """
-    # Load and validate configuration
     config = Config()
     config.validate()
 
-    # Initialize services
     factcheck_service = FactCheckService(api_key=config.google_factcheck_api_key)
     gemini_service = GeminiService(api_key=config.gemini_api_key)
 
-    # Initialize agents with dependency injection
     claim_agent = ClaimAgent()
     memory_agent = MemoryAgent(history_file=config.history_file)
     evidence_agent = EvidenceAgent(factcheck_service=factcheck_service)
@@ -79,52 +74,44 @@ def verify_claim(
     reasoning_agent: ReasoningAgent,
 ) -> None:
     """
-    Run the full verification pipeline for a single rumour.
+    Run the verification pipeline for a single rumour.
 
-    Flow:
-        1. ClaimAgent normalizes the input
-        2. MemoryAgent checks for a cached result
-        3. If cached → print and return
-        4. EvidenceAgent gathers fact-check evidence
-        5. ReasoningAgent analyzes evidence and produces verdict
-        6. MemoryAgent saves the new result
-        7. Print the verification report
-
-    Args:
-        raw_input: Raw rumour text from the user.
-        claim_agent: The ClaimAgent instance.
-        memory_agent: The MemoryAgent instance.
-        evidence_agent: The EvidenceAgent instance.
-        reasoning_agent: The ReasoningAgent instance.
+    Features:
+    - Consistent cache check before external calls
+    - Allows '!<claim>' prefix or '--fresh' CLI flag to force live re-verification
+    - Only caches valid successful results
     """
+    # Check if user requested a forced fresh lookup
+    force_fresh = raw_input.startswith("!") or "--fresh" in sys.argv
+    cleaned_input = raw_input[1:].strip() if raw_input.startswith("!") else raw_input
+
     # Step 1: Normalize the claim
-    claim = claim_agent.process(raw_input)
+    claim = claim_agent.process(cleaned_input)
     if not claim:
         print("\n  ⚠  Please enter a valid claim to verify.\n")
         return
 
-    # Step 2: Check memory for cached result
-    cached_result = memory_agent.search(claim)
-    if cached_result:
-        print("\n  📋  Found cached verification result:")
-        print_report(cached_result)
-        return
+    # Step 2: Check Cache (if not forced fresh)
+    if not force_fresh:
+        cached_result = memory_agent.search(claim)
+        if cached_result:
+            print("\n  📋  [CACHE HIT] Found previous verification result (type '!<claim>' to force re-check):")
+            print_report(cached_result)
+            return
 
-    # Step 3: Gather evidence
-    print("\n  🔎  Searching for fact-check evidence...")
-    evidence = evidence_agent.gather(claim)
+    # Step 3: Gather live evidence from web & fact-check sources
+    with TerminalSpinner("Searching official fact-checks & multi-source web evidence"):
+        evidence = evidence_agent.gather(claim)
 
-    if not evidence:
-        print("  ⚠  No fact-check evidence found. Proceeding with AI analysis...")
+    # Step 4: Analyze and produce grounded verdict with Gemini 2.5 Flash
+    with TerminalSpinner("Analyzing evidence & generating grounded verdict with Gemini 2.5 Flash"):
+        result = reasoning_agent.analyze(claim, evidence)
 
-    # Step 4: Analyze and produce verdict
-    print("  🤖  Analyzing evidence with AI...")
-    result = reasoning_agent.analyze(claim, evidence)
+    # Step 5: Save to memory (Only caches valid results; operational failures are ignored by MemoryAgent)
+    if result.get("status") == "SUCCESS":
+        memory_agent.save(result)
 
-    # Step 5: Save to memory
-    memory_agent.save(result)
-
-    # Step 6: Print the report
+    # Step 6: Print formatted report
     print_report(result)
 
 
@@ -143,7 +130,8 @@ def main() -> None:
         print(f"\n  ❌  Initialization Error: {e}\n")
         sys.exit(1)
 
-    print("  Type a rumour to verify, or 'quit' to exit.\n")
+    print("  Type a rumour to verify, or 'quit' to exit.")
+    print("  Tip: Prefix with '!' (e.g., '!earth is round') to bypass cache and re-verify live.\n")
 
     while True:
         try:
